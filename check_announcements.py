@@ -7,7 +7,7 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
-URL = "https://kapadokya.edu.tr/duyurular"
+URL = "https://kapadokya.edu.tr/duyurular?page=1"
 STATE_FILE = "seen.json"
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
@@ -25,7 +25,6 @@ def fetch_announcements():
         link = urljoin(URL, a["href"])
         if link in items:
             continue
-        # Linkin bulundugu kutuyu bul: icinde sadece bu duyurunun linki olan en genis ust eleman
         box = a
         while box.parent and len(box.parent.find_all("a", href=LINK_RE)) == 1:
             box = box.parent
@@ -47,36 +46,63 @@ def send(text):
     r.raise_for_status()
 
 
+def load_state():
+    """seen.json: {link: tarih}. Eski format (sadece link listesi) otomatik donusturulur."""
+    if not os.path.exists(STATE_FILE):
+        return None
+    with open(STATE_FILE, encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, list):
+        return {link: None for link in data}  # tarih bilinmiyor
+    return data
+
+
+def save_state(state):
+    # en fazla 500 kayit tut (sozluk ekleme sirasini korur)
+    keys = list(state)[-500:]
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump({k: state[k] for k in keys}, f, ensure_ascii=False, indent=2)
+
+
 def main():
     items = fetch_announcements()
     if not items:
         print("Hic duyuru bulunamadi, sayfa yapisi degismis olabilir.")
         sys.exit(1)
 
-    first_run = not os.path.exists(STATE_FILE)
-    seen = []
-    if not first_run:
-        with open(STATE_FILE, encoding="utf-8") as f:
-            seen = json.load(f)
+    state = load_state()
+    first_run = state is None
 
     if first_run:
         send("✅ Kapadokya Üniversitesi duyuru takibi başladı. Yeni duyurular buraya gelecek.")
-        new_links = []
-    else:
-        new_links = [l for l in items if l not in seen]
+        state = {}
 
-    # eskiden yeniye gonder
-    for link in reversed(new_links):
+    notifications = []  # (tur, link)
+    # eskiden yeniye dogru isle
+    for link in reversed(list(items)):
+        date = items[link]["date"]
+        if link not in state:
+            if not first_run:
+                notifications.append(("new", link))
+            state[link] = date
+        else:
+            old = state[link]
+            if old is None:
+                state[link] = date  # eski formattan gecis, bildirme
+            elif date and old != date:
+                notifications.append(("updated", link))
+                state[link] = date
+
+    for kind, link in notifications:
         it = items[link]
-        send(f"📢 Yeni duyuru\n\n{it['title']}\n{it['date']}\n\n{link}")
-        print("Gonderildi:", it["title"])
+        head = "📢 Yeni duyuru" if kind == "new" else "🔄 Güncellenen duyuru"
+        send(f"{head}\n\n{it['title']}\n{it['date']}\n\n{link}")
+        print("Gonderildi:", kind, it["title"])
 
-    updated = seen + [l for l in reversed(list(items)) if l not in seen]
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(updated[-500:], f, ensure_ascii=False, indent=2)
-
-    print(f"Kontrol tamam. Yeni duyuru: {len(new_links)}")
+    save_state(state)
+    print(f"Kontrol tamam. Bildirim: {len(notifications)}")
 
 
 if __name__ == "__main__":
     main()
+    
